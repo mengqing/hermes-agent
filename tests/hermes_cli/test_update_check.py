@@ -26,14 +26,25 @@ def test_check_for_updates_uses_cache(tmp_path, monkeypatch):
     (repo_dir / ".git").mkdir()
 
     cache_file = tmp_path / ".update_check"
-    cache_file.write_text(json.dumps({"ts": time.time(), "behind": 3}))
+    cache_file.write_text(
+        json.dumps(
+            {
+                "ts": time.time(),
+                "behind": 3,
+                "origin_url": "git@github.com:example/hermes-agent.git",
+            }
+        )
+    )
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    with patch("hermes_cli.banner.subprocess.run") as mock_run:
+    with patch(
+        "hermes_cli.banner.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="git@github.com:example/hermes-agent.git\n"),
+    ) as mock_run:
         result = check_for_updates()
 
     assert result == 3
-    mock_run.assert_not_called()
+    assert mock_run.call_count == 1  # git remote get-url origin
 
 
 def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
@@ -55,7 +66,45 @@ def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
         result = check_for_updates()
 
     assert result == 5
-    assert mock_run.call_count == 2  # git fetch + git rev-list
+    assert mock_run.call_count == 3  # remote get-url + git fetch + git rev-list
+
+
+def test_check_for_updates_invalidates_cache_when_origin_changes(tmp_path, monkeypatch):
+    """Fresh cache should be ignored when current origin differs from cached origin."""
+    from hermes_cli.banner import check_for_updates
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(
+        json.dumps(
+            {
+                "ts": time.time(),
+                "behind": 99,
+                "origin_url": "https://github.com/NousResearch/hermes-agent.git",
+            }
+        )
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def _fake_run(args, **kwargs):
+        cmd = " ".join(args)
+        if "remote get-url origin" in cmd:
+            return MagicMock(returncode=0, stdout="git@github.com:mengqing/hermes-agent.git\n")
+        if "rev-list" in cmd:
+            return MagicMock(returncode=0, stdout="0\n")
+        if "fetch" in cmd:
+            return MagicMock(returncode=0, stdout="", stderr="")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("hermes_cli.banner.subprocess.run", side_effect=_fake_run) as mock_run:
+        result = check_for_updates()
+
+    assert result == 0
+    assert mock_run.call_count == 3
 
 
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):

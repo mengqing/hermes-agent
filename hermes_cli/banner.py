@@ -123,6 +123,24 @@ def get_available_skills() -> Dict[str, List[str]]:
 _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 
 
+def _git_origin_url(repo_dir: Path) -> Optional[str]:
+    """Return the configured origin URL for *repo_dir*, or ``None`` on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(repo_dir),
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    return value or None
+
+
 def check_for_updates() -> Optional[int]:
     """Check how many commits behind origin/main the local repo is.
 
@@ -142,11 +160,16 @@ def check_for_updates() -> Optional[int]:
 
     # Read cache
     now = time.time()
+    current_origin = _git_origin_url(repo_dir)
     try:
         if cache_file.exists():
             cached = json.loads(cache_file.read_text())
             if now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS:
-                return cached.get("behind")
+                cached_origin = cached.get("origin_url")
+                # Use cache if we cannot resolve origin (offline/error), or
+                # if the cached origin matches current origin.
+                if current_origin is None or cached_origin == current_origin:
+                    return cached.get("behind")
     except Exception:
         pass
 
@@ -176,7 +199,13 @@ def check_for_updates() -> Optional[int]:
 
     # Write cache
     try:
-        cache_file.write_text(json.dumps({"ts": now, "behind": behind}))
+        cache_file.write_text(
+            json.dumps({
+                "ts": now,
+                "behind": behind,
+                "origin_url": current_origin,
+            })
+        )
     except Exception:
         pass
 
