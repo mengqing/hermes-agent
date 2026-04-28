@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import urllib.request
 import urllib.error
 import time
@@ -93,6 +94,7 @@ VERCEL_AI_GATEWAY_MODELS: list[tuple[str, str]] = [
 ]
 
 _ai_gateway_catalog_cache: list[tuple[str, str]] | None = None
+_AZURE_FOUNDRY_CACHE_TTL = 300  # 5 minutes
 
 
 def _codex_curated_models() -> list[str]:
@@ -1848,6 +1850,10 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
         live = fetch_ollama_cloud_models(force_refresh=force_refresh)
         if live:
             return live
+    if normalized == "azure-foundry":
+        live = fetch_azure_foundry_models(force_refresh=force_refresh)
+        if live:
+            return live
     if normalized == "openai":
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if api_key:
@@ -2508,6 +2514,224 @@ def fetch_api_models(
     return probe_api_models(api_key, base_url, timeout=timeout, api_mode=api_mode).get("models")
 
 
+def _azure_foundry_cache_path() -> Path:
+    """Return the path for the Azure Foundry model cache."""
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "azure_foundry_models_cache.json"
+
+
+def _load_azure_foundry_cache(
+    base_url: str,
+    *,
+    source: str,
+    ignore_ttl: bool = False,
+) -> Optional[list[str]]:
+    """Load cached Azure Foundry models for the given endpoint URL."""
+    try:
+        cache_path = _azure_foundry_cache_path()
+        if not cache_path.exists():
+            return None
+        with open(cache_path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        if str(data.get("base_url") or "").rstrip("/") != base_url.rstrip("/"):
+            return None
+        cached_source = str(data.get("source") or "models").strip().lower() or "models"
+        if cached_source != source:
+            return None
+        models = data.get("models")
+        if not isinstance(models, list):
+            return None
+        if not ignore_ttl:
+            cached_at = float(data.get("cached_at") or 0)
+            if (time.time() - cached_at) > _AZURE_FOUNDRY_CACHE_TTL:
+                return None
+        return [str(m) for m in models if str(m).strip()]
+    except Exception:
+        return None
+
+
+def _save_azure_foundry_cache(base_url: str, models: list[str], *, source: str) -> None:
+    """Persist Azure Foundry models for the active endpoint URL."""
+    try:
+        from utils import atomic_json_write
+
+        cache_path = _azure_foundry_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_json_write(
+            cache_path,
+            {
+                "base_url": base_url.rstrip("/"),
+                "source": source,
+                "models": models,
+                "cached_at": time.time(),
+            },
+            indent=None,
+        )
+    except Exception:
+        pass
+
+
+def fetch_azure_foundry_models(*, force_refresh: bool = False) -> list[str]:
+    """Fetch Azure Foundry model IDs from ``AZURE_FOUNDRY_BASE_URL/models``.
+
+    Uses the Azure-aware probe helper (`hermes_cli.azure_detect`) so legacy
+    ``api-version`` fallback is handled for older endpoints.
+    """
+    try:
+        from hermes_cli.auth import resolve_api_key_provider_credentials
+
+        creds = resolve_api_key_provider_credentials("azure-foundry")
+    except Exception:
+        return []
+
+    api_key = str(creds.get("api_key") or "").strip()
+    base_url = str(creds.get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        try:
+            from hermes_cli.config import load_config
+
+            cfg = load_config() or {}
+            model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+            cfg_provider = normalize_provider(model_cfg.get("provider", ""))
+            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            if cfg_provider == "azure-foundry" and cfg_base_url:
+                base_url = cfg_base_url
+        except Exception:
+            pass
+    if not api_key or not base_url:
+        return []
+
+    source_mode = (os.getenv("AZURE_FOUNDRY_MODEL_SOURCE", "auto") or "auto").strip().lower()
+    if source_mode not in {"auto", "models", "deployments"}:
+        source_mode = "auto"
+
+    def _resource_name_from_base_url(url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+
+            host = (urlparse(url).hostname or "").strip().lower()
+            suffix = ".openai.azure.com"
+            if host.endswith(suffix):
+                return host[: -len(suffix)]
+        except Exception:
+            pass
+        return ""
+
+    def _run_az(args: list[str]) -> Optional[str]:
+        try:
+            proc = subprocess.run(
+                args,
+                capture_output=True,
+                text=True,
+                timeout=12,
+                check=False,
+            )
+        except Exception:
+            return None
+        if proc.returncode != 0:
+            return None
+        return proc.stdout
+
+    def _fetch_deployments_via_az() -> Optional[list[str]]:
+        resource_name = (os.getenv("AZURE_RESOURCE_NAME", "") or "").strip() or _resource_name_from_base_url(base_url)
+        if not resource_name:
+            return None
+
+        resource_group = (os.getenv("AZURE_RESOURCE_GROUP", "") or "").strip()
+        subscription = (os.getenv("AZURE_SUBSCRIPTION_ID", "") or "").strip()
+
+        # If RG isn't provided, discover it by account name.
+        if not resource_group:
+            discover_cmd = [
+                "az",
+                "cognitiveservices",
+                "account",
+                "list",
+                "--query",
+                f"[?name=='{resource_name}'].resourceGroup | [0]",
+                "-o",
+                "tsv",
+            ]
+            if subscription:
+                discover_cmd.extend(["--subscription", subscription])
+            out = _run_az(discover_cmd)
+            if out:
+                resource_group = out.strip()
+
+        if not resource_group:
+            return None
+
+        deploy_cmd = [
+            "az",
+            "cognitiveservices",
+            "account",
+            "deployment",
+            "list",
+            "--name",
+            resource_name,
+            "--resource-group",
+            resource_group,
+            "--query",
+            "[].name",
+            "-o",
+            "json",
+        ]
+        if subscription:
+            deploy_cmd.extend(["--subscription", subscription])
+
+        out = _run_az(deploy_cmd)
+        if not out:
+            return None
+        try:
+            arr = json.loads(out)
+        except Exception:
+            return None
+        if not isinstance(arr, list):
+            return None
+        cleaned = [str(x).strip() for x in arr if str(x).strip()]
+        return list(dict.fromkeys(cleaned))
+
+    effective_source = "models"
+    if source_mode in {"auto", "deployments"}:
+        effective_source = "deployments"
+        if not force_refresh:
+            cached = _load_azure_foundry_cache(base_url, source=effective_source)
+            if cached is not None:
+                return cached
+
+        deployed = _fetch_deployments_via_az()
+        if deployed is not None:
+            _save_azure_foundry_cache(base_url, deployed, source=effective_source)
+            return deployed
+        if source_mode == "deployments":
+            stale = _load_azure_foundry_cache(base_url, source=effective_source, ignore_ttl=True)
+            return stale or []
+
+    effective_source = "models"
+
+    if not force_refresh:
+        cached = _load_azure_foundry_cache(base_url, source=effective_source)
+        if cached is not None:
+            return cached
+
+    try:
+        from hermes_cli.azure_detect import _probe_openai_models
+
+        ok, models = _probe_openai_models(base_url, api_key)
+        if ok:
+            cleaned = list(dict.fromkeys(m for m in models if isinstance(m, str) and m.strip()))
+            _save_azure_foundry_cache(base_url, cleaned, source=effective_source)
+            return cleaned
+    except Exception:
+        pass
+
+    stale = _load_azure_foundry_cache(base_url, source=effective_source, ignore_ttl=True)
+    return stale or []
+
+
 # ---------------------------------------------------------------------------
 # Ollama Cloud — merged model discovery with disk cache
 # ---------------------------------------------------------------------------
@@ -2920,6 +3144,42 @@ def validate_requested_model(
                 m[len("models/"):] if isinstance(m, str) and m.startswith("models/") else m
                 for m in api_models
             ]
+
+        # Azure Foundry can return versioned model IDs from /models
+        # (e.g. gpt-5.4-pro-2026-03-05) while deployed aliases used in
+        # runtime switching are shorter (e.g. gpt-5.4-pro). Accept any
+        # model that appears in provider_model_ids("azure-foundry") to
+        # keep /model validation aligned with deployed-only picker results.
+        if normalized == "azure-foundry":
+            try:
+                deployed_models = provider_model_ids("azure-foundry")
+            except Exception:
+                deployed_models = []
+            if deployed_models:
+                deployed_lower = {m.lower(): m for m in deployed_models}
+                if requested_for_lookup.lower() in deployed_lower:
+                    return {
+                        "accepted": True,
+                        "persist": True,
+                        "recognized": True,
+                        "message": None,
+                    }
+                auto = get_close_matches(
+                    requested_for_lookup.lower(),
+                    list(deployed_lower.keys()),
+                    n=1,
+                    cutoff=0.9,
+                )
+                if auto:
+                    corrected = deployed_lower[auto[0]]
+                    return {
+                        "accepted": True,
+                        "persist": True,
+                        "recognized": True,
+                        "corrected_model": corrected,
+                        "message": f"Auto-corrected `{requested}` → `{corrected}`",
+                    }
+
         if requested_for_lookup in set(api_models):
             # API confirmed the model exists
             return {

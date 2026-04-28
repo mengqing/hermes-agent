@@ -1173,7 +1173,7 @@ def list_authenticated_providers(
         if not has_creds:
             continue
 
-        if hermes_slug in {"copilot", "copilot-acp"}:
+        if hermes_slug in {"copilot", "copilot-acp", "azure-foundry"}:
             model_ids = provider_model_ids(hermes_slug)
         else:
             # Use curated list — look up by Hermes slug, fall back to overlay key
@@ -1181,8 +1181,26 @@ def list_authenticated_providers(
             # Merge with models.dev for preferred providers (same rationale as above).
             if hermes_slug in _MODELS_DEV_PREFERRED:
                 model_ids = _merge_with_models_dev(hermes_slug, model_ids)
-        total = len(model_ids)
-        top = model_ids[:max_models]
+        if hermes_slug == "azure-foundry":
+            # Azure /models responses can be very large and often interleave
+            # date-stamped versions with canonical aliases. For the picker,
+            # prioritize canonical-looking IDs and avoid truncating to the
+            # generic max_models cap so common IDs like ``gpt-4o-mini``
+            # remain selectable.
+            model_ids = list(dict.fromkeys(str(m) for m in model_ids if str(m).strip()))
+
+            def _azure_sort_key(mid: str) -> tuple[bool, bool, str]:
+                lowered = mid.lower()
+                has_date = bool(re.search(r"(?:^|[-_])20\d{2}(?:[-_]\d{2}){0,2}", lowered))
+                has_numeric_suffix = bool(re.search(r"-\d+(?:\.\d+)+$", lowered))
+                return (has_date, has_numeric_suffix, lowered)
+
+            model_ids.sort(key=_azure_sort_key)
+            total = len(model_ids)
+            top = model_ids
+        else:
+            total = len(model_ids)
+            top = model_ids[:max_models]
 
         results.append({
             "slug": hermes_slug,

@@ -211,6 +211,76 @@ class TestProviderModelIds:
         ):
             assert provider_model_ids("stepfun") == ["step-3.5-flash", "step-3-agent-lite"]
 
+    def test_azure_foundry_prefers_live_catalog(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("AZURE_FOUNDRY_MODEL_SOURCE", "models")
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={
+                "api_key": "az-key",
+                "base_url": "https://my-resource.openai.azure.com/openai/v1",
+            },
+        ), patch(
+            "hermes_cli.azure_detect._probe_openai_models",
+            return_value=(True, ["gpt-4o-mini", "gpt-4.1-mini"]),
+        ):
+            assert provider_model_ids("azure-foundry", force_refresh=True) == [
+                "gpt-4o-mini",
+                "gpt-4.1-mini",
+            ]
+
+    def test_azure_foundry_uses_config_base_url_when_env_base_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("AZURE_FOUNDRY_MODEL_SOURCE", "models")
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={
+                "api_key": "az-key",
+                "base_url": "",
+            },
+        ), patch(
+            "hermes_cli.config.load_config",
+            return_value={
+                "model": {
+                    "provider": "azure-foundry",
+                    "base_url": "https://my-resource.openai.azure.com/openai/v1",
+                }
+            },
+        ), patch(
+            "hermes_cli.azure_detect._probe_openai_models",
+            return_value=(True, ["gpt-4o-mini"]),
+        ):
+            assert provider_model_ids("azure-foundry", force_refresh=True) == ["gpt-4o-mini"]
+
+    def test_azure_foundry_deployments_mode_uses_az_cli(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("AZURE_FOUNDRY_MODEL_SOURCE", "deployments")
+        monkeypatch.setenv("AZURE_RESOURCE_NAME", "otp-ai")
+        monkeypatch.setenv("AZURE_RESOURCE_GROUP", "AI")
+
+        class _Proc:
+            def __init__(self, code=0, out=""):
+                self.returncode = code
+                self.stdout = out
+
+        def _fake_run(args, **kwargs):
+            joined = " ".join(args)
+            if "deployment list" in joined:
+                return _Proc(0, '["gpt-4o-mini","gpt-5.4-mini"]')
+            return _Proc(1, "")
+
+        with patch(
+            "hermes_cli.auth.resolve_api_key_provider_credentials",
+            return_value={
+                "api_key": "az-key",
+                "base_url": "https://otp-ai.openai.azure.com/openai/v1",
+            },
+        ), patch("hermes_cli.models.subprocess.run", side_effect=_fake_run):
+            assert provider_model_ids("azure-foundry", force_refresh=True) == [
+                "gpt-4o-mini",
+                "gpt-5.4-mini",
+            ]
+
     def test_copilot_prefers_live_catalog(self):
         with patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={"api_key": "gh-token"}), \
              patch("hermes_cli.models._fetch_github_models", return_value=["gpt-5.4", "claude-sonnet-4.6"]):
@@ -674,6 +744,23 @@ class TestValidateCodexAutoCorrection:
         assert result["recognized"] is False
         assert result.get("corrected_model") is None
         assert "not found" in result["message"]
+
+
+class TestValidateAzureFoundryAliases:
+    def test_accepts_deployed_alias_when_api_lists_versioned_models(self):
+        with patch(
+            "hermes_cli.models.fetch_api_models",
+            return_value=["gpt-5.4-pro-2026-03-05", "gpt-4o-mini-2024-07-18"],
+        ), patch(
+            "hermes_cli.models.provider_model_ids",
+            return_value=["gpt-5.4-pro", "gpt-4o-mini"],
+        ):
+            result = validate_requested_model("gpt-5.4-pro", "azure-foundry")
+
+        assert result["accepted"] is True
+        assert result["persist"] is True
+        assert result["recognized"] is True
+        assert result["message"] is None
 
 
 # -- probe_api_models — Cloudflare UA mitigation --------------------------------
