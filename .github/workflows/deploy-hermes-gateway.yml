@@ -1,0 +1,94 @@
+name: Deploy Hermes Gateway
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-gateway-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate deploy inputs
+        env:
+          HERMES_DEPLOY_HOST: ${{ vars.HERMES_DEPLOY_HOST }}
+          HERMES_DEPLOY_USER: ${{ vars.HERMES_DEPLOY_USER }}
+          HERMES_DEPLOY_PATH: ${{ vars.HERMES_DEPLOY_PATH }}
+          HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+          HERMES_DEPLOY_SSH_KEY: ${{ secrets.HERMES_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          for key in HERMES_DEPLOY_HOST HERMES_DEPLOY_USER HERMES_DEPLOY_PATH HERMES_DEPLOY_SSH_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::$key is not configured"
+              exit 1
+            fi
+          done
+
+      - name: Prepare SSH client
+        env:
+          HERMES_DEPLOY_HOST: ${{ vars.HERMES_DEPLOY_HOST }}
+          HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+          HERMES_DEPLOY_SSH_KEY: ${{ secrets.HERMES_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$HERMES_DEPLOY_SSH_KEY" > ~/.ssh/hermes_deploy_key
+          chmod 600 ~/.ssh/hermes_deploy_key
+          ssh-keyscan -p "${HERMES_DEPLOY_PORT:-22}" -H "$HERMES_DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy and restart gateway
+        env:
+          HERMES_DEPLOY_HOST: ${{ vars.HERMES_DEPLOY_HOST }}
+          HERMES_DEPLOY_USER: ${{ vars.HERMES_DEPLOY_USER }}
+          HERMES_DEPLOY_PATH: ${{ vars.HERMES_DEPLOY_PATH }}
+          HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+        run: |
+          set -euo pipefail
+
+          ssh -i ~/.ssh/hermes_deploy_key \
+            -p "${HERMES_DEPLOY_PORT:-22}" \
+            -o StrictHostKeyChecking=yes \
+            "${HERMES_DEPLOY_USER}@${HERMES_DEPLOY_HOST}" \
+            "DEPLOY_PATH='${HERMES_DEPLOY_PATH}' HERMES_HOME='${HERMES_DEPLOY_PATH}/.hermes' bash -se" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$DEPLOY_PATH"
+
+          if [ -x venv/bin/hermes ]; then
+            HERMES_BIN="$DEPLOY_PATH/venv/bin/hermes"
+            PYTHON_BIN="$DEPLOY_PATH/venv/bin/python"
+          elif [ -x .venv/bin/hermes ]; then
+            HERMES_BIN="$DEPLOY_PATH/.venv/bin/hermes"
+            PYTHON_BIN="$DEPLOY_PATH/.venv/bin/python"
+          else
+            HERMES_BIN="$(command -v hermes)"
+            PYTHON_BIN="$(command -v python3)"
+          fi
+
+          git fetch --prune origin main
+          git reset --hard origin/main
+          git clean -fd
+
+          if [ -x "$PYTHON_BIN" ]; then
+            "$PYTHON_BIN" -m pip install -e .
+          fi
+
+          if [ -d scripts/whatsapp-bridge ]; then
+            (cd scripts/whatsapp-bridge && npm ci --no-fund --no-audit --progress=false)
+          fi
+
+          if ! HERMES_HOME="$DEPLOY_PATH/.hermes" "$HERMES_BIN" gateway restart; then
+            HERMES_HOME="$DEPLOY_PATH/.hermes" "$HERMES_BIN" gateway install
+            HERMES_HOME="$DEPLOY_PATH/.hermes" "$HERMES_BIN" gateway start
+          fi
+
+          HERMES_HOME="$DEPLOY_PATH/.hermes" "$HERMES_BIN" gateway status
+          REMOTE
