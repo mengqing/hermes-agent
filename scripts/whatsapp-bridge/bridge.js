@@ -48,11 +48,14 @@ const DOCUMENT_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'docume
 const AUDIO_CACHE_DIR = path.join(process.env.HOME || '~', '.hermes', 'audio_cache');
 const PAIR_ONLY = args.includes('--pair-only');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
+const WHATSAPP_PAIRING_METHOD = getArg('pairing-method', process.env.WHATSAPP_PAIRING_METHOD || 'qr').toLowerCase();
+const WHATSAPP_PAIRING_PHONE_NUMBER = getArg('pairing-phone', process.env.WHATSAPP_PAIRING_PHONE_NUMBER || '').replace(/\D/g, '');
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
   : process.env.WHATSAPP_REPLY_PREFIX.replace(/\\n/g, '\n');
+let pairingCodeRequested = false;
 
 function formatOutgoingMessage(message) {
   // In bot mode, messages come from a different number so the prefix is
@@ -60,6 +63,14 @@ function formatOutgoingMessage(message) {
   // self-chat mode where bot and user share the same number.
   if (WHATSAPP_MODE !== 'self-chat') return message;
   return REPLY_PREFIX ? `${REPLY_PREFIX}${message}` : message;
+}
+
+function getPairingPhoneNumber() {
+  if (WHATSAPP_PAIRING_PHONE_NUMBER) return WHATSAPP_PAIRING_PHONE_NUMBER;
+  if (WHATSAPP_MODE === 'self-chat' && ALLOWED_USERS.size === 1) {
+    return Array.from(ALLOWED_USERS)[0].replace(/\D/g, '');
+  }
+  return '';
 }
 
 function normalizeWhatsAppId(value) {
@@ -147,9 +158,30 @@ async function startSocket() {
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
-      console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
-      qrcode.generate(qr, { small: true });
-      console.log('\nWaiting for scan...\n');
+      if (WHATSAPP_PAIRING_METHOD === 'code' && !sock.authState.creds.registered && !pairingCodeRequested) {
+        const phoneNumber = getPairingPhoneNumber();
+        if (!phoneNumber) {
+          console.log('\n⚠ WhatsApp pairing code mode requires a phone number.');
+          console.log('   Set WHATSAPP_PAIRING_PHONE_NUMBER or WHATSAPP_ALLOWED_USERS (self-chat mode only).\n');
+        } else {
+          pairingCodeRequested = true;
+          (async () => {
+            try {
+              console.log('\n🔢 Requesting WhatsApp pairing code...\n');
+              const code = await sock.requestPairingCode(phoneNumber);
+              console.log('📱 Open WhatsApp on your phone: Settings → Linked Devices → Link a Device → Link with phone number');
+              console.log(`🔢 Pairing code: ${code}`);
+              console.log('\nEnter this code on your phone to complete pairing.\n');
+            } catch (error) {
+              console.error('❌ Failed to request WhatsApp pairing code:', error?.message || error);
+            }
+          })();
+        }
+      } else {
+        console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
+        qrcode.generate(qr, { small: true });
+        console.log('\nWaiting for scan...\n');
+      }
     }
 
     if (connection === 'close') {

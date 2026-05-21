@@ -155,6 +155,21 @@ This generates a fresh QR code. Scan it again and the session is re-established.
 handles **temporary** disconnections (network blips, phone going offline briefly) automatically
 with reconnection logic.
 
+### Pairing code fallback
+
+If WhatsApp refuses the QR link attempt on your phone with a message like **"can't link device"**, you can use WhatsApp's phone-number pairing flow instead:
+
+```bash
+# Bridge-side pairing code mode
+WHATSAPP_PAIRING_METHOD=code
+WHATSAPP_PAIRING_PHONE_NUMBER=15551234567
+```
+
+Then restart pairing with `hermes whatsapp` or `hermes gateway`. The bridge will print a
+pairing code, which you enter on your phone under **Settings → Linked Devices → Link a Device →
+Link with phone number**. In self-chat mode, Hermes can also reuse the single
+`WHATSAPP_ALLOWED_USERS` number as the pairing target.
+
 ---
 
 ## Voice Messages
