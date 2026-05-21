@@ -1,0 +1,174 @@
+name: Enable WhatsApp (Production)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pairing_method:
+        description: "Pairing method (code or qr)"
+        required: true
+        default: "code"
+        type: choice
+        options:
+          - code
+          - qr
+      pairing_phone:
+        description: "Phone number for code pairing (digits only, optional if self-chat + single allowlist user)"
+        required: false
+        type: string
+      whatsapp_mode:
+        description: "WhatsApp mode"
+        required: true
+        default: "self-chat"
+        type: choice
+        options:
+          - self-chat
+          - bot
+      allowed_users:
+        description: "Allowed users (comma-separated E.164 digits, or *). Leave blank to keep current value"
+        required: false
+        type: string
+      reset_session:
+        description: "Clear existing WhatsApp session before pairing"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-whatsapp-enable
+  cancel-in-progress: false
+
+jobs:
+  enable:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Validate deploy inputs
+        env:
+          HERMES_DEPLOY_HOST: ${{ vars.HERMES_DEPLOY_HOST }}
+          HERMES_DEPLOY_USER: ${{ vars.HERMES_DEPLOY_USER }}
+          HERMES_DEPLOY_PATH: ${{ vars.HERMES_DEPLOY_PATH }}
+          HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+          HERMES_DEPLOY_SSH_KEY: ${{ secrets.HERMES_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          for key in HERMES_DEPLOY_HOST HERMES_DEPLOY_USER HERMES_DEPLOY_PATH HERMES_DEPLOY_SSH_KEY; do
+            if [ -z "${!key:-}" ]; then
+              echo "::error::$key is not configured"
+              exit 1
+            fi
+          done
+
+      - name: Prepare SSH client
+        env:
+          HERMES_DEPLOY_HOST: ${{ vars.HERMES_DEPLOY_HOST }}
+          HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+          HERMES_DEPLOY_SSH_KEY: ${{ secrets.HERMES_DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$HERMES_DEPLOY_SSH_KEY" > ~/.ssh/hermes_deploy_key
+          chmod 600 ~/.ssh/hermes_deploy_key
+          ssh-keyscan -p "${HERMES_DEPLOY_PORT:-22}" -H "$HERMES_DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Enable WhatsApp + pair + restart gateway
+        env:
+          HERMES_DEPLOY_HOST: ${{ vars.HERMES_DEPLOY_HOST }}
+          HERMES_DEPLOY_USER: ${{ vars.HERMES_DEPLOY_USER }}
+          HERMES_DEPLOY_PATH: ${{ vars.HERMES_DEPLOY_PATH }}
+          HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+          INPUT_PAIRING_METHOD: ${{ inputs.pairing_method }}
+          INPUT_PAIRING_PHONE: ${{ inputs.pairing_phone }}
+          INPUT_WHATSAPP_MODE: ${{ inputs.whatsapp_mode }}
+          INPUT_ALLOWED_USERS: ${{ inputs.allowed_users }}
+          INPUT_RESET_SESSION: ${{ inputs.reset_session }}
+        run: |
+          set -euo pipefail
+
+          ssh -i ~/.ssh/hermes_deploy_key \
+            -p "${HERMES_DEPLOY_PORT:-22}" \
+            -o StrictHostKeyChecking=yes \
+            "${HERMES_DEPLOY_USER}@${HERMES_DEPLOY_HOST}" \
+            "DEPLOY_PATH='${HERMES_DEPLOY_PATH}' HERMES_HOME='${HERMES_DEPLOY_PATH}/.hermes' INPUT_PAIRING_METHOD='${INPUT_PAIRING_METHOD}' INPUT_PAIRING_PHONE='${INPUT_PAIRING_PHONE}' INPUT_WHATSAPP_MODE='${INPUT_WHATSAPP_MODE}' INPUT_ALLOWED_USERS='${INPUT_ALLOWED_USERS}' INPUT_RESET_SESSION='${INPUT_RESET_SESSION}' bash -se" <<'REMOTE'
+          set -euo pipefail
+
+          cd "$DEPLOY_PATH"
+          HERMES_HOME="$DEPLOY_PATH/.hermes"
+          mkdir -p "$HERMES_HOME"
+
+          if [ -x venv/bin/hermes ]; then
+            HERMES_BIN="$DEPLOY_PATH/venv/bin/hermes"
+          elif [ -x .venv/bin/hermes ]; then
+            HERMES_BIN="$DEPLOY_PATH/.venv/bin/hermes"
+          else
+            HERMES_BIN="$(command -v hermes)"
+          fi
+
+          if [ -z "${HERMES_BIN:-}" ]; then
+            echo "hermes binary not found"
+            exit 1
+          fi
+
+          if [ -d scripts/whatsapp-bridge ]; then
+            (cd scripts/whatsapp-bridge && npm ci --no-fund --no-audit --progress=false)
+          fi
+
+          ENV_FILE="$HERMES_HOME/.env"
+          touch "$ENV_FILE"
+
+          set_env_key() {
+            key="$1"
+            value="$2"
+            if grep -qE "^${key}=" "$ENV_FILE"; then
+              sed -i.bak "s|^${key}=.*$|${key}=${value}|" "$ENV_FILE"
+            else
+              printf "%s=%s\n" "$key" "$value" >> "$ENV_FILE"
+            fi
+            rm -f "$ENV_FILE.bak"
+          }
+
+          set_env_key "WHATSAPP_ENABLED" "true"
+          set_env_key "WHATSAPP_MODE" "${INPUT_WHATSAPP_MODE}"
+
+          if [ -n "${INPUT_ALLOWED_USERS}" ]; then
+            set_env_key "WHATSAPP_ALLOWED_USERS" "${INPUT_ALLOWED_USERS}"
+          fi
+
+          SESSION_DIR="$HERMES_HOME/whatsapp/session"
+          mkdir -p "$SESSION_DIR"
+          if [ "${INPUT_RESET_SESSION}" = "true" ]; then
+            rm -rf "$SESSION_DIR"
+            mkdir -p "$SESSION_DIR"
+          fi
+
+          # Load configured vars (including WHATSAPP_ALLOWED_USERS) for bridge runtime.
+          set -a
+          . "$ENV_FILE"
+          set +a
+
+          export WHATSAPP_PAIRING_METHOD="${INPUT_PAIRING_METHOD}"
+          if [ -n "${INPUT_PAIRING_PHONE}" ]; then
+            export WHATSAPP_PAIRING_PHONE_NUMBER="${INPUT_PAIRING_PHONE}"
+          fi
+
+          echo "\n== WhatsApp pairing bootstrap =="
+          echo "pairing_method=${WHATSAPP_PAIRING_METHOD}"
+          echo "whatsapp_mode=${INPUT_WHATSAPP_MODE}"
+          if [ -n "${INPUT_ALLOWED_USERS}" ]; then
+            echo "allowed_users=${INPUT_ALLOWED_USERS}"
+          fi
+
+          # Run pair-only bridge briefly so it can print QR / pairing code.
+          # The process can continue waiting for pairing; timeout keeps workflow bounded.
+          timeout 75s node scripts/whatsapp-bridge/bridge.js --pair-only --session "$SESSION_DIR" --mode "${INPUT_WHATSAPP_MODE}" || true
+
+          echo "\n== Restarting gateway =="
+          if ! HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway restart; then
+            HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway install
+            HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway start
+          fi
+
+          HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway status
+          REMOTE
