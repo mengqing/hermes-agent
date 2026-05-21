@@ -32,6 +32,11 @@ on:
         required: true
         default: true
         type: boolean
+      restart_gateway:
+        description: "Restart gateway after pairing bootstrap"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -93,6 +98,7 @@ jobs:
           INPUT_WHATSAPP_MODE: ${{ inputs.whatsapp_mode }}
           INPUT_ALLOWED_USERS: ${{ inputs.allowed_users }}
           INPUT_RESET_SESSION: ${{ inputs.reset_session }}
+          INPUT_RESTART_GATEWAY: ${{ inputs.restart_gateway }}
         run: |
           set -euo pipefail
 
@@ -177,11 +183,15 @@ jobs:
           # The process can continue waiting for pairing; timeout keeps workflow bounded.
           timeout 75s node scripts/whatsapp-bridge/bridge.js --pair-only --session "$SESSION_DIR" --mode "${INPUT_WHATSAPP_MODE}" || true
 
-          echo "\n== Restarting gateway =="
-          if ! HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway restart; then
-            HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway install
-            HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway start
-          fi
+          if [ "${INPUT_RESTART_GATEWAY}" = "true" ]; then
+            echo "\n== Restarting gateway =="
+            if ! HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway restart; then
+              HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway install
+              HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway start
+            fi
 
-          HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway status
+            HERMES_HOME="$HERMES_HOME" "$HERMES_BIN" gateway status
+          else
+            echo "\nSkipping gateway restart (restart_gateway=false)."
+          fi
           REMOTE
