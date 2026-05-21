@@ -112,7 +112,11 @@ jobs:
           fi
 
           if [ -d scripts/whatsapp-bridge ]; then
-            (cd scripts/whatsapp-bridge && npm ci --no-fund --no-audit --progress=false)
+            if [ ! -d scripts/whatsapp-bridge/node_modules ]; then
+              (cd scripts/whatsapp-bridge && npm ci --no-fund --no-audit --progress=false)
+            else
+              echo "whatsapp bridge node_modules already present; skipping npm ci"
+            fi
           fi
 
           ENV_FILE="$HERMES_HOME/.env"
