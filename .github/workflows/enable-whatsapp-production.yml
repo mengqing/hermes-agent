@@ -71,7 +71,16 @@ jobs:
           install -d -m 700 ~/.ssh
           printf '%s\n' "$HERMES_DEPLOY_SSH_KEY" > ~/.ssh/hermes_deploy_key
           chmod 600 ~/.ssh/hermes_deploy_key
-          ssh-keyscan -p "${HERMES_DEPLOY_PORT:-22}" -H "$HERMES_DEPLOY_HOST" >> ~/.ssh/known_hosts
+          for i in 1 2 3 4 5; do
+            if ssh-keyscan -p "${HERMES_DEPLOY_PORT:-22}" -H "$HERMES_DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null; then
+              break
+            fi
+            if [ "$i" -eq 5 ]; then
+              echo "::error::ssh-keyscan failed after 5 attempts"
+              exit 1
+            fi
+            sleep 2
+          done
 
       - name: Enable WhatsApp + pair + restart gateway
         env:
