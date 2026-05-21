@@ -106,7 +106,7 @@ jobs:
             -p "${HERMES_DEPLOY_PORT:-22}" \
             -o StrictHostKeyChecking=yes \
             "${HERMES_DEPLOY_USER}@${HERMES_DEPLOY_HOST}" \
-            "DEPLOY_PATH='${HERMES_DEPLOY_PATH}' HERMES_HOME='${HERMES_DEPLOY_PATH}/.hermes' INPUT_PAIRING_METHOD='${INPUT_PAIRING_METHOD}' INPUT_PAIRING_PHONE='${INPUT_PAIRING_PHONE}' INPUT_WHATSAPP_MODE='${INPUT_WHATSAPP_MODE}' INPUT_ALLOWED_USERS='${INPUT_ALLOWED_USERS}' INPUT_RESET_SESSION='${INPUT_RESET_SESSION}' bash -se" <<'REMOTE'
+            "DEPLOY_PATH='${HERMES_DEPLOY_PATH}' HERMES_HOME='${HERMES_DEPLOY_PATH}/.hermes' INPUT_PAIRING_METHOD='${INPUT_PAIRING_METHOD}' INPUT_PAIRING_PHONE='${INPUT_PAIRING_PHONE}' INPUT_WHATSAPP_MODE='${INPUT_WHATSAPP_MODE}' INPUT_ALLOWED_USERS='${INPUT_ALLOWED_USERS}' INPUT_RESET_SESSION='${INPUT_RESET_SESSION}' INPUT_RESTART_GATEWAY='${INPUT_RESTART_GATEWAY}' bash -se" <<'REMOTE'
           set -euo pipefail
 
           cd "$DEPLOY_PATH"
@@ -128,9 +128,10 @@ jobs:
 
           if [ -d scripts/whatsapp-bridge ]; then
             if [ ! -d scripts/whatsapp-bridge/node_modules ]; then
-              (cd scripts/whatsapp-bridge && npm ci --no-fund --no-audit --progress=false)
+              (cd scripts/whatsapp-bridge && npm ci --no-fund --no-audit --progress=false) || \
+              (cd scripts/whatsapp-bridge && npm install --no-fund --no-audit --progress=false)
             else
-              echo "whatsapp bridge node_modules already present; skipping npm ci"
+              (cd scripts/whatsapp-bridge && npm install --no-fund --no-audit --progress=false)
             fi
           fi
 
