@@ -50,6 +50,7 @@ jobs:
           HERMES_DEPLOY_USER: ${{ vars.HERMES_DEPLOY_USER }}
           HERMES_DEPLOY_PATH: ${{ vars.HERMES_DEPLOY_PATH }}
           HERMES_DEPLOY_PORT: ${{ vars.HERMES_DEPLOY_PORT }}
+          AZURE_FOUNDRY_API_KEY: ${{ secrets.AZURE_FOUNDRY_API_KEY }}
         run: |
           set -euo pipefail
 
@@ -57,7 +58,7 @@ jobs:
             -p "${HERMES_DEPLOY_PORT:-22}" \
             -o StrictHostKeyChecking=yes \
             "${HERMES_DEPLOY_USER}@${HERMES_DEPLOY_HOST}" \
-            "DEPLOY_PATH='${HERMES_DEPLOY_PATH}' HERMES_HOME='${HERMES_DEPLOY_PATH}/.hermes' bash -se" <<'REMOTE'
+            "DEPLOY_PATH='${HERMES_DEPLOY_PATH}' HERMES_HOME='${HERMES_DEPLOY_PATH}/.hermes' AZURE_FOUNDRY_API_KEY='${AZURE_FOUNDRY_API_KEY}' bash -se" <<'REMOTE'
           set -euo pipefail
 
           cd "$DEPLOY_PATH"
@@ -82,6 +83,19 @@ jobs:
               "$PYTHON_BIN" -m ensurepip --upgrade
             fi
             "$PYTHON_BIN" -m pip install -e .
+          fi
+
+          HERMES_HOME="$DEPLOY_PATH/.hermes" bash scripts/bootstrap_hermes_prod.sh
+
+          if [ -n "${AZURE_FOUNDRY_API_KEY:-}" ]; then
+            ENV_FILE="$DEPLOY_PATH/.hermes/.env"
+            touch "$ENV_FILE"
+            if grep -qE '^AZURE_FOUNDRY_API_KEY=' "$ENV_FILE"; then
+              sed -i.bak "s|^AZURE_FOUNDRY_API_KEY=.*$|AZURE_FOUNDRY_API_KEY=${AZURE_FOUNDRY_API_KEY}|" "$ENV_FILE"
+              rm -f "$ENV_FILE.bak"
+            else
+              printf 'AZURE_FOUNDRY_API_KEY=%s\n' "$AZURE_FOUNDRY_API_KEY" >> "$ENV_FILE"
+            fi
           fi
 
           if [ -d scripts/whatsapp-bridge ]; then
