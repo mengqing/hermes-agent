@@ -2085,6 +2085,97 @@ def _is_github_models_base_url(base_url: Optional[str]) -> bool:
     )
 
 
+def _lmstudio_server_root(base_url: Optional[str]) -> Optional[str]:
+    """Strip `/v1` suffix from an LM Studio base URL to get native API root."""
+    root = (base_url or "").strip().rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3].rstrip("/")
+    return root or None
+
+
+def _lmstudio_request_headers(api_key: Optional[str] = None) -> dict[str, str]:
+    """Build HTTP headers for LM Studio native API requests."""
+    headers = {"User-Agent": _HERMES_USER_AGENT}
+    token = str(api_key or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _lmstudio_fetch_raw_models(
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    timeout: float = 5.0,
+) -> Optional[list[dict[str, Any]]]:
+    """Fetch raw model entries from LM Studio `/api/v1/models`.
+
+    Returns None on network/malformed responses and raises AuthError for 401/403.
+    """
+    server_root = _lmstudio_server_root(base_url)
+    if not server_root:
+        return None
+
+    request = urllib.request.Request(
+        server_root + "/api/v1/models",
+        headers=_lmstudio_request_headers(api_key),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code in {401, 403}:
+            from hermes_cli.auth import AuthError
+
+            raise AuthError(
+                f"LM Studio rejected the request with HTTP {exc.code}.",
+                provider="lmstudio",
+                code="auth_rejected",
+            ) from exc
+        return None
+    except Exception:
+        return None
+
+    raw_models = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(raw_models, list):
+        return None
+    return raw_models
+
+
+def probe_lmstudio_models(
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    timeout: float = 5.0,
+) -> Optional[list[str]]:
+    """Probe LM Studio model listing and return chat-capable model keys.
+
+    Returns None when unreachable, malformed, or base URL is invalid.
+    """
+    raw_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=timeout)
+    if raw_models is None:
+        return None
+
+    keys: list[str] = []
+    for raw in raw_models:
+        if not isinstance(raw, dict):
+            continue
+        if str(raw.get("type") or "").strip().lower() == "embedding":
+            continue
+        key = str(raw.get("key") or raw.get("id") or "").strip()
+        if key and key not in keys:
+            keys.append(key)
+    return keys
+
+
+def fetch_lmstudio_models(
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    timeout: float = 5.0,
+) -> list[str]:
+    """Return LM Studio chat-capable model keys, empty list when unavailable."""
+    models = probe_lmstudio_models(api_key=api_key, base_url=base_url, timeout=timeout)
+    return models or []
+
+
 def _fetch_github_models(api_key: Optional[str] = None, timeout: float = 5.0) -> Optional[list[str]]:
     catalog = fetch_github_model_catalog(api_key=api_key, timeout=timeout)
     if not catalog:
@@ -2334,7 +2425,7 @@ def opencode_model_api_mode(provider_id: Optional[str], model_id: Optional[str])
         return "chat_completions"
 
     if provider == "opencode-go":
-        if normalized.startswith("minimax-"):
+        if normalized.startswith("minimax-") or normalized.startswith("qwen"):
             return "anthropic_messages"
         return "chat_completions"
 
@@ -2896,6 +2987,52 @@ def validate_requested_model(
             "persist": False,
             "recognized": False,
             "message": "Model names cannot contain spaces.",
+        }
+
+    if normalized == "lmstudio":
+        from hermes_cli.auth import AuthError
+
+        try:
+            models = probe_lmstudio_models(api_key=api_key, base_url=base_url)
+        except AuthError as exc:
+            return {
+                "accepted": False,
+                "persist": False,
+                "recognized": False,
+                "message": (
+                    f"{exc} Set `LM_API_KEY` (or update it) to match the server's bearer token."
+                ),
+            }
+
+        if models is None:
+            return {
+                "accepted": False,
+                "persist": False,
+                "recognized": False,
+                "message": f"Could not reach LM Studio's `/api/v1/models` to validate `{requested}`.",
+            }
+        if not models:
+            return {
+                "accepted": False,
+                "persist": False,
+                "recognized": False,
+                "message": (
+                    f"LM Studio is reachable but no chat-capable models are loaded. "
+                    f"Load `{requested}` in LM Studio (Developer tab → Load Model) and try again."
+                ),
+            }
+        if requested_for_lookup in set(models):
+            return {
+                "accepted": True,
+                "persist": True,
+                "recognized": True,
+                "message": None,
+            }
+        return {
+            "accepted": False,
+            "persist": False,
+            "recognized": False,
+            "message": f"Model `{requested}` was not found in LM Studio's model listing.",
         }
 
     if normalized == "custom":

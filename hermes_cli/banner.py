@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, List, Optional
@@ -156,7 +157,7 @@ def check_for_updates() -> Optional[int]:
     if not (repo_dir / ".git").exists():
         repo_dir = Path(__file__).parent.parent.resolve()
     if not (repo_dir / ".git").exists():
-        return None
+        return check_via_pypi()
 
     # Read cache
     now = time.time()
@@ -210,6 +211,49 @@ def check_for_updates() -> Optional[int]:
         pass
 
     return behind
+
+
+def _version_tuple(v: str) -> tuple[int, ...]:
+    """Parse versions like ``0.13.0`` into a comparable integer tuple."""
+    parts: list[int] = []
+    for segment in str(v).split("."):
+        try:
+            parts.append(int(segment))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _fetch_pypi_latest(package: str = "hermes-agent") -> Optional[str]:
+    """Fetch latest package version from PyPI. Returns None on failure."""
+    try:
+        url = f"https://pypi.org/pypi/{package}/json"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+        version = data.get("info", {}).get("version")
+        return str(version) if version else None
+    except Exception:
+        return None
+
+
+def check_via_pypi() -> Optional[int]:
+    """Compare installed Hermes version with PyPI latest.
+
+    Returns:
+      - 0 when current version is up-to-date
+      - 1 when PyPI has a newer version
+      - None when lookup fails
+    """
+    latest = _fetch_pypi_latest()
+    if latest is None:
+        return None
+    if latest == VERSION:
+        return 0
+    try:
+        return 1 if _version_tuple(latest) > _version_tuple(VERSION) else 0
+    except Exception:
+        return 1 if latest != VERSION else 0
 
 
 def _resolve_repo_dir() -> Optional[Path]:
